@@ -1,0 +1,46 @@
+[package]
+name = "bbrr-companion"
+version = "0.1.0"
+description = "Desktop companion for Booty Bay Raid Review — watches your WarcraftRecorder/Archon folder and auto-uploads matched pull videos."
+authors = ["Booty Bay Raid Review"]
+license = "MIT"
+edition = "2021"
+
+# see more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# the `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# this seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "bbrr_companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# blocking HTTP — the commands that call it are #[tauri::command(async)], so
+# synchronous reqwest runs off the main thread and keeps the auth/upload code
+# simple (no async juggling). rustls avoids a system OpenSSL dependency.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# OS keychain for the access token (Windows Credential Manager / macOS Keychain /
+# Secret Service on Linux).
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+# PKCE for the browser sign-in loopback.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+# open the system browser for sign-in.
+open = "5"
+urlencoding = "2"
+# folder watching + recursive scan for WarcraftRecorder videos.
+notify = "6"
+walkdir = "2"
+# native folder picker.
+tauri-plugin-dialog = "2"
+
