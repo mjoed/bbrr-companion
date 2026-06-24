@@ -37,6 +37,13 @@ export const ipc = {
   // native folder picker (returns null if cancelled).
   pickFolder: () => open({ directory: true, multiple: false }) as Promise<string | null>,
 
+  // combat-log livelog watching
+  setLogsFolder: (path: string) => invoke<Settings>("set_logs_folder", { path }),
+  // native picker for the WoW Logs folder (returns null if cancelled).
+  pickLogsFolder: () => invoke<string | null>("pick_logs_folder"),
+  setLivelogWatching: (enabled: boolean) => invoke<Settings>("set_livelog_watching", { enabled }),
+  setAutoUpload: (enabled: boolean) => invoke<Settings>("set_auto_upload", { enabled }),
+
   // manual match
   listPulls: (guildId: string) => invoke<PullSummary[]>("list_pulls", { guildId }),
   manualMatch: (videoId: string, choice: ManualMatchChoice) => invoke<void>("manual_match", { videoId, choice }),

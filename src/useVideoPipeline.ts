@@ -12,6 +12,10 @@ export interface VideoPipeline {
   // forget the backlog/baseline snapshot — call on a folder switch so the new
   // folder's existing files are re-baselined as backlog, not treated as new.
   resetAutoUpload: () => void;
+  // freeze everything currently on screen as "already existed" — call when the
+  // user turns auto-upload ON, so the backlog seen while it was off never uploads
+  // and only recordings/pulls appearing afterwards do.
+  rebaselineAutoUpload: () => void;
   queue: string[];
   paused: boolean;
   uploadActive: boolean;
@@ -26,7 +30,7 @@ export interface VideoPipeline {
 // engine with its auto-upload gate (see autoUpload.ts), the upload queue, and
 // the live Rust events that patch all three. pulled out together so the view
 // stays presentational and the gating logic is isolated from the JSX.
-export function useVideoPipeline(): VideoPipeline {
+export function useVideoPipeline(autoUploadEnabled: boolean): VideoPipeline {
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [scanning, setScanning] = useState(false);
   const [hasScanned, setHasScanned] = useState(false);
@@ -46,6 +50,15 @@ export function useVideoPipeline(): VideoPipeline {
   const speedRef = useRef<{ id: string; bytes: number; t: number } | null>(null);
   // backlog/baseline bookkeeping for the auto-upload decision (see autoUpload.ts).
   const autoRef = useRef(createAutoUploadState());
+  // current auto-upload setting, in a ref so doScan reads the live value without
+  // being re-created. when off, scans still match + list videos, they just never
+  // auto-enqueue — manual upload and re-baseline-on-enable are handled in the view.
+  const autoUploadRef = useRef(autoUploadEnabled);
+  autoUploadRef.current = autoUploadEnabled;
+  // latest scanned video list, for a synchronous re-baseline (see
+  // rebaselineAutoUpload) without waiting on a scan.
+  const videosRef = useRef<VideoItem[]>([]);
+  videosRef.current = videos;
 
   // queue one video for upload (manual button or auto-upload). Rust always
   // (re)starts the worker on enqueue, so this also clears any pause.
@@ -76,9 +89,13 @@ export function useVideoPipeline(): VideoPipeline {
           });
           setHasScanned(true);
           // all backlog/baseline gating lives in reconcileScan; it returns only
-          // the ids that should actually auto-upload this pass.
-          for (const id of reconcileScan(next, matchOk, autoRef.current, Date.now())) {
-            enqueue(id);
+          // the ids that should actually auto-upload this pass. skipped entirely
+          // while auto-upload is off — enabling it re-baselines (resetAutoUpload),
+          // so the backlog seen while off is never swept up.
+          if (autoUploadRef.current) {
+            for (const id of reconcileScan(next, matchOk, autoRef.current, Date.now())) {
+              enqueue(id);
+            }
           }
         } while (pendingScanRef.current); // catch up on any scan dropped while busy
       } catch {
@@ -101,6 +118,22 @@ export function useVideoPipeline(): VideoPipeline {
   // baseline, uploading nothing for them.
   const resetAutoUpload = useCallback(() => {
     autoRef.current = createAutoUploadState();
+  }, []);
+
+  // re-baseline against what's on screen right now: snapshot the current
+  // recordings and their matched pulls as "already existed", so when auto-upload
+  // is switched on the backlog found while it was off stays manual-only and only
+  // recordings/pulls that appear afterwards auto-upload. done synchronously (not
+  // via a scan) so it can't race the gate flipping on.
+  const rebaselineAutoUpload = useCallback(() => {
+    const st = createAutoUploadState();
+    for (const v of videosRef.current) {
+      st.preexistingFiles.add(v.id);
+      if (v.matched) st.seenPulls.add(v.matched.pullId);
+    }
+    st.didSnapshot = true;
+    st.pullBaselineReady = true;
+    autoRef.current = st;
   }, []);
 
   // initial load. everything in the persisted cache was on disk before this
@@ -180,6 +213,7 @@ export function useVideoPipeline(): VideoPipeline {
     doScan,
     scanDebounced,
     resetAutoUpload,
+    rebaselineAutoUpload,
     queue,
     paused,
     uploadActive,

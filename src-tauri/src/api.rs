@@ -6,6 +6,7 @@
 //! (not a file-wide allow, which would hide real dead code).
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -82,6 +83,28 @@ pub struct CreateUpload {
     pub storage_label: Option<String>,
 }
 
+/// what the companion sends when a tracked raid encounter ends — the server maps
+/// it to active livelog reports and may trigger an immediate WCL poll.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncounterSignal {
+    pub guild_id: String,
+    pub encounter_id: i64,
+    pub encounter_name: String,
+    pub difficulty_id: i64,
+    pub success: bool,
+    pub start_time: i64,
+    pub end_time: i64,
+}
+
+/// the server's verdict on an encounter signal: whether the boss is tracked, and
+/// whether an immediate poll was actually triggered (vs. debounced).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EncounterSignalResp {
+    pub tracked: bool,
+    pub polled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullSummary {
@@ -153,18 +176,38 @@ fn read_json<T: serde::de::DeserializeOwned>(res: reqwest::blocking::Response, l
     res.json::<T>().map_err(|e| e.to_string())
 }
 
-impl ApiClient {
-    pub fn new(base: String, token: String) -> Self {
-        // timeouts are essential: `scan` is single-flight (UI side), so a hung
-        // request with no timeout would freeze the re-scan loop until restart.
-        // large multipart PUTs use a separate, untimed client (see put_part).
-        let http = reqwest::blocking::Client::builder()
+/// one process-wide blocking client, reused (a cheap Arc clone) by every ApiClient.
+/// reqwest's blocking client owns an inner tokio runtime; building a fresh one per
+/// call meant that runtime was dropped wherever the ApiClient was dropped — and
+/// when that's a Tauri async worker (the `#[tauri::command(async)]` handlers run
+/// there), tokio panics: "cannot drop a runtime in a context where blocking is not
+/// allowed". sharing one client keeps the runtime alive until process exit, so the
+/// per-call clones drop cheaply. built once, lazily.
+fn shared_http() -> &'static reqwest::blocking::Client {
+    // timeouts are essential: `scan` is single-flight (UI side), so a hung request
+    // with no timeout would freeze the re-scan loop until restart. large multipart
+    // PUTs use a separate, untimed client (see put_part).
+    static HTTP: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::blocking::Client::builder()
             .user_agent(concat!("BBRRCompanion/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(60))
             .build()
-            .expect("failed to build http client");
-        Self { base, token, http }
+            .expect("failed to build http client")
+    })
+}
+
+/// warm the shared client at startup, on the main thread — off any async worker, so
+/// the first request doesn't pay the build cost and the build never runs inside a
+/// runtime context.
+pub fn warm_http_client() {
+    let _ = shared_http();
+}
+
+impl ApiClient {
+    pub fn new(base: String, token: String) -> Self {
+        Self { base, token, http: shared_http().clone() }
     }
 
     /// client for the build-pinned base (see [`crate::settings::base_url`]).
@@ -205,6 +248,20 @@ impl ApiClient {
             .send()
             .map_err(|e| e.to_string())?;
         Ok(read_json::<Resp>(res, "match")?.results)
+    }
+
+    /// tell the server a tracked raid encounter just ended so it can poll WCL
+    /// immediately instead of waiting for its 60s livelog timer. the response
+    /// reports whether the boss is tracked and whether a poll actually fired.
+    pub fn post_encounter_signal(&self, payload: &EncounterSignal) -> Result<EncounterSignalResp, String> {
+        let res = self
+            .http
+            .post(format!("{}/api/companion/encounter", self.base))
+            .bearer_auth(&self.token)
+            .json(payload)
+            .send()
+            .map_err(|e| e.to_string())?;
+        read_json::<EncounterSignalResp>(res, "encounter signal")
     }
 
     /// recent pulls the user played in a guild — for the manual-match picker.

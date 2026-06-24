@@ -114,7 +114,7 @@ fn abort_and_log(app: &AppHandle, client: &ApiClient, created: &api::CreateUploa
             app,
             "warn",
             format!(
-                "Couldn't clean up the interrupted upload of {filename}: {e}. \
+                "[Video] Couldn't clean up the interrupted upload of {filename}: {e}. \
                  The bucket may keep the partial parts until its lifecycle rule removes them."
             ),
         );
@@ -315,7 +315,7 @@ fn upload_one_part(
                     app,
                     "warn",
                     format!(
-                        "Part {} of {} failed ({}), retrying ({attempt}/{MAX_PART_ATTEMPTS})…",
+                        "[Video] Part {} of {} failed ({}), retrying ({attempt}/{MAX_PART_ATTEMPTS})…",
                         part_index + 1,
                         filename,
                         e.msg,
@@ -402,7 +402,7 @@ pub fn run_worker(app: AppHandle) {
             v.uploaded_bytes = Some(0);
             v.reason = None;
         });
-        crate::applog::push(&app, "info", format!("Uploading {}…", video.filename));
+        crate::applog::push(&app, "info", format!("[Video] Uploading {}…", video.filename));
 
         // re-read the limit each video so a change applies promptly.
         let limit = crate::settings::Settings::load(&settings_path).upload_limit_mbps;
@@ -416,7 +416,7 @@ pub fn run_worker(app: AppHandle) {
                         m.existing_video_id = Some(video_id);
                     }
                 });
-                crate::applog::push(&app, "info", format!("Uploaded {} to {}", video.filename, guild));
+                crate::applog::push(&app, "info", format!("[Video] Uploaded {} to {}", video.filename, guild));
             }
             Ok(UploadOutcome::Cancelled) => {
                 {
@@ -428,7 +428,7 @@ pub fn run_worker(app: AppHandle) {
                     v.status = "matched".into();
                     v.uploaded_bytes = None;
                 });
-                crate::applog::push(&app, "info", "Uploads cancelled");
+                crate::applog::push(&app, "info", "[Video] Uploads cancelled");
                 break;
             }
             Ok(UploadOutcome::NotReady) => {
@@ -443,7 +443,7 @@ pub fn run_worker(app: AppHandle) {
                 sleep_with_control(1500, &control);
             }
             Err(e) => {
-                crate::applog::push(&app, "error", format!("Upload failed for {}: {}", video.filename, e));
+                crate::applog::push(&app, "error", format!("[Video] Upload failed for {}: {}", video.filename, e));
                 update_video(&app, &video.id, |v| {
                     v.status = "error".into();
                     v.uploaded_bytes = None;

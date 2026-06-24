@@ -124,6 +124,7 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
     doScan,
     scanDebounced,
     resetAutoUpload,
+    rebaselineAutoUpload,
     queue,
     paused,
     uploadActive,
@@ -132,7 +133,7 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
     pause,
     resume,
     cancel,
-  } = useVideoPipeline();
+  } = useVideoPipeline(settings?.autoUpload !== false);
   const { log, showOldLog, loadingOldLog, viewOldLog } = useActivityLog();
 
   const allIds = guilds.map((g) => g.id);
@@ -224,6 +225,30 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
     setSettings(await ipc.setFolder(folder));
   }
 
+  async function chooseLogsFolder() {
+    const folder = await ipc.pickLogsFolder();
+    if (!folder) return;
+    setSettings(await ipc.setLogsFolder(folder));
+  }
+
+  async function toggleLivelogWatching() {
+    // default-on: null counts as enabled, so the first toggle turns it off.
+    const next = settings?.livelogWatching === false;
+    setSettings(await ipc.setLivelogWatching(next));
+  }
+
+  async function toggleAutoUpload() {
+    // default-on: null counts as enabled, so the first toggle turns it off.
+    const next = settings?.autoUpload === false;
+    setSettings(await ipc.setAutoUpload(next));
+    if (next) {
+      // turning it ON re-baselines: the recordings/pulls found while it was off
+      // are snapshotted as pre-existing, so only things discovered from now on
+      // auto-upload. (anything already there stays manual-upload only.)
+      rebaselineAutoUpload();
+    }
+  }
+
   async function toggleGuild(id: string) {
     const current = settings?.selectedGuildIds ?? allIds;
     const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
@@ -306,8 +331,14 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
 
       {/* folder + watching */}
       <div className="card">
-        <div className="card-title">WarcraftRecorder or Archon video folder</div>
         <div className="row spread">
+          <div className="card-title" style={{ marginBottom: 0 }}>WarcraftRecorder or Archon video folder</div>
+          <label className="autostart-toggle">
+            <span className={settings.autoUpload !== false ? "on" : "off"}>Autoupload</span>
+            <input type="checkbox" checked={settings.autoUpload !== false} onChange={toggleAutoUpload} />
+          </label>
+        </div>
+        <div className="row spread" style={{ marginTop: "0.75rem" }}>
           <span className="path muted small">{settings.watchFolder ?? "No folder selected"}</span>
           <button className="btn ghost" onClick={chooseFolder}>Choose…</button>
         </div>
@@ -333,6 +364,34 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
           <span className="muted small">MB/s — blank for unlimited</span>
         </div>
       </div>
+
+      {/* combat-log watching — accelerates livelog WCL polling when a guild is
+          actively livelog-ing. mirrors the video-folder card above. */}
+      {(() => {
+        // default-on: null counts as enabled, so only an explicit false disables.
+        const livelogOn = settings.livelogWatching !== false;
+        const status = !livelogOn
+          ? "Disabled"
+          : !settings.logsFolder
+            ? "Choose your WoW Logs folder to begin"
+            : "Waiting for a live raid session — see the Activity log";
+        return (
+          <div className="card">
+            <div className="row spread">
+              <div className="card-title" style={{ marginBottom: 0 }}>WoWCombatLog watching</div>
+              <label className="autostart-toggle">
+                <span className={livelogOn ? "on" : "off"}>Livelog Watching</span>
+                <input type="checkbox" checked={livelogOn} onChange={toggleLivelogWatching} />
+              </label>
+            </div>
+            <div className="row spread" style={{ marginTop: "0.75rem" }}>
+              <span className="path muted small">{settings.logsFolder ?? "No folder selected"}</span>
+              <button className="btn ghost" onClick={chooseLogsFolder}>Browse…</button>
+            </div>
+            <div className="muted small" style={{ marginTop: "0.6rem" }}>{status}</div>
+          </div>
+        );
+      })()}
 
       {/* upload control (only while something is in flight) */}
       {(uploadActive || queuedVideos.length > 0) && (() => {

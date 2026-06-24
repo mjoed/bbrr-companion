@@ -21,6 +21,9 @@ export interface Settings {
   watchFolder: string | null;
   selectedGuildIds: string[] | null; // null = all guilds
   uploadLimitMbps: number | null;
+  logsFolder: string | null;
+  livelogWatching: boolean | null; // null = enabled (default-on)
+  autoUpload: boolean | null; // null = enabled (default-on)
 }
 
 export interface MatchedInfo {

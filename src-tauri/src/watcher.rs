@@ -19,7 +19,7 @@ pub fn start(app: AppHandle, folder: &str) -> Result<RecommendedWatcher, String>
             }
             // surface watch failures (folder unmounted, OS watch limit, event-queue
             // overflow) instead of letting the watch silently go inert.
-            Err(e) => crate::applog::push(&app, "warn", format!("Folder watch error: {e}")),
+            Err(e) => crate::applog::push(&app, "warn", format!("[Video] Folder watch error: {e}")),
         }
     })
     .map_err(|e| e.to_string())?;

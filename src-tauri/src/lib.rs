@@ -1,6 +1,8 @@
 mod api;
 mod applog;
 mod auth;
+mod combatlog;
+mod detect;
 mod keychain;
 mod metadata;
 mod scan;
@@ -41,6 +43,8 @@ pub(crate) struct AppState {
     pub(crate) log: Mutex<Vec<applog::LogEntry>>,
     /// epoch-ms of the last "a guild's match failed" warning, to throttle it.
     pub(crate) last_match_warn_ms: Mutex<u128>,
+    /// combat-log tailer controller (active-livelog guild set + run/stop flags).
+    pub(crate) combatlog: combatlog::CombatLogState,
 }
 
 /// `.lock()` that recovers from a poisoned mutex instead of re-panicking. the
@@ -98,13 +102,60 @@ fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
     Ok(Settings::load(&settings_path(&app)?))
 }
 
-#[tauri::command(async)]
-fn sign_in(state: tauri::State<'_, AppState>) -> Result<WhoAmI, String> {
+/// first-run convenience: auto-fill folders we can detect, so the app works out of
+/// the box. only fills a setting that is still unset — a user's explicit choice is
+/// never overridden. detects the WoW retail Logs folder (combat-log watching) and
+/// the recording folder, preferring WarcraftRecorder's own config (it stores both
+/// paths); Archon-only setups still pick the recording folder manually.
+fn autodetect_folders(app: &tauri::AppHandle) {
+    let Ok(path) = settings_path(app) else { return };
+    let mut s = Settings::load(&path);
+    let cfg = app.path().config_dir().ok();
+    let cfg = cfg.as_deref();
+    let mut changed = false;
+    if s.logs_folder.is_none() {
+        if let Some(logs) = detect::wow_logs_folder(cfg) {
+            applog::push(app, "info", format!("[Combatlog] auto-detected WoW Logs folder: {logs}"));
+            s.logs_folder = Some(logs);
+            changed = true;
+        }
+    }
+    if s.watch_folder.is_none() {
+        if let Some(folder) = detect::recording_folder(cfg) {
+            applog::push(app, "info", format!("[Video] auto-detected recording folder: {folder}"));
+            s.watch_folder = Some(folder);
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = s.save(&path);
+    }
+}
+
+/// run a blocking closure on tokio's blocking pool, OFF the async-command worker.
+/// async tauri commands run on multi-thread tokio workers where blocking is
+/// forbidden; reqwest::blocking builds + drops a throwaway runtime per request and
+/// (in debug builds) panics there ("cannot drop a runtime in a context where
+/// blocking is not allowed"). spawn_blocking moves that work to a thread where
+/// blocking is allowed.
+async fn run_blocking<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn sign_in(state: tauri::State<'_, AppState>) -> Result<WhoAmI, String> {
     let cancel = state.sign_in_cancel.clone();
     cancel.store(false, Ordering::Relaxed);
-    let token = auth::sign_in(settings::base_url(), APP_NAME, &cancel)?;
-    keychain::store_token(&token)?;
-    ApiClient::production(token).whoami()
+    run_blocking(move || {
+        let token = auth::sign_in(settings::base_url(), APP_NAME, &cancel)?;
+        keychain::store_token(&token)?;
+        ApiClient::production(token).whoami()
+    })
+    .await
 }
 
 /// abort an in-progress sign-in (the loopback listener stops within ~100ms).
@@ -113,19 +164,22 @@ fn cancel_sign_in(state: tauri::State<AppState>) {
     state.sign_in_cancel.store(true, Ordering::Relaxed);
 }
 
-#[tauri::command(async)]
-fn current_session() -> Result<Option<WhoAmI>, String> {
-    let Some(token) = keychain::get_token() else {
-        return Ok(None);
-    };
-    match ApiClient::production(token).whoami() {
-        Ok(who) => Ok(Some(who)),
-        // a rejected token = signed out. any other failure (offline right after
-        // autostart, server down) is surfaced as Err so the UI can keep the
-        // session and retry instead of bouncing a valid login to the sign-in screen.
-        Err(e) if e == "unauthorized" => Ok(None),
-        Err(e) => Err(e),
-    }
+#[tauri::command]
+async fn current_session() -> Result<Option<WhoAmI>, String> {
+    run_blocking(|| {
+        let Some(token) = keychain::get_token() else {
+            return Ok(None);
+        };
+        match ApiClient::production(token).whoami() {
+            Ok(who) => Ok(Some(who)),
+            // a rejected token = signed out. any other failure (offline right after
+            // autostart, server down) is surfaced as Err so the UI can keep the
+            // session and retry instead of bouncing a valid login to the sign-in screen.
+            Err(e) if e == "unauthorized" => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -170,18 +224,29 @@ struct ScanResult {
 }
 
 /// scan the watch folder, match all finished recordings, store + return the list.
-#[tauri::command(async)]
-fn scan(app: tauri::AppHandle, state: tauri::State<'_, AppState>, verify: bool) -> Result<ScanResult, String> {
+#[tauri::command]
+async fn scan(app: tauri::AppHandle, state: tauri::State<'_, AppState>, verify: bool) -> Result<ScanResult, String> {
     let s = Settings::load(&settings_path(&app)?);
     let folder = s.watch_folder.clone().ok_or("No folder selected")?;
     let token = keychain::get_token().ok_or("Not signed in")?;
-    let who = ApiClient::production(token.clone()).whoami()?;
     // normally already-"uploaded" files are skipped (only new / unresolved
     // recordings hit the server) and their status preserved. `verify` (periodic
     // backstop + manual scan) re-checks them so a POV deleted on the web stops
     // showing as "already on the server".
     let prev = state.videos.lock_safe().clone();
-    let (fresh, match_ok) = scan::scan_and_match(settings::base_url(), &token, &who.guilds, &s.selected_guild_ids, &folder, &prev, verify)?;
+    // whoami + the per-guild match calls are blocking HTTP — run them off the async
+    // worker so reqwest::blocking never drops its runtime on a tokio worker.
+    let selected = s.selected_guild_ids.clone();
+    let (fresh, match_ok) = {
+        let token = token.clone();
+        let folder = folder.clone();
+        let prev = prev.clone();
+        run_blocking(move || {
+            let who = ApiClient::production(token.clone()).whoami()?;
+            scan::scan_and_match(settings::base_url(), &token, &who.guilds, &selected, &folder, &prev, verify)
+        })
+        .await?
+    };
     let merged: Vec<VideoItem> = fresh
         .into_iter()
         .map(|f| match prev.iter().find(|cached| cached.id == f.id) {
@@ -218,12 +283,12 @@ fn scan(app: tauri::AppHandle, state: tauri::State<'_, AppState>, verify: bool) 
         match item.status.as_str() {
             "matched" => {
                 if let Some(m) = &item.matched {
-                    applog::push(&app, "info", format!("Matched {} → {} #{} ({})", item.filename, m.boss_name, m.pull_number, m.guild_name));
+                    applog::push(&app, "info", format!("[Video] Matched {} → {} #{} ({})", item.filename, m.boss_name, m.pull_number, m.guild_name));
                 }
             }
-            "uploaded" => applog::push(&app, "info", format!("Already on server: {}", item.filename)),
-            "unmatched" => applog::push(&app, "info", format!("No match: {}{}", item.filename, reason_suffix(&item.reason))),
-            "error" => applog::push(&app, "error", format!("{}{}", item.filename, reason_suffix(&item.reason))),
+            "uploaded" => applog::push(&app, "info", format!("[Video] Already on server: {}", item.filename)),
+            "unmatched" => applog::push(&app, "info", format!("[Video] No match: {}{}", item.filename, reason_suffix(&item.reason))),
+            "error" => applog::push(&app, "error", format!("[Video] {}{}", item.filename, reason_suffix(&item.reason))),
             _ => {}
         }
     }
@@ -239,7 +304,7 @@ fn scan(app: tauri::AppHandle, state: tauri::State<'_, AppState>, verify: bool) 
         if now.saturating_sub(*last) > 10 * 60 * 1000 {
             *last = now;
             drop(last);
-            applog::push(&app, "warn", "A guild's match request failed — new recordings may not auto-upload until it recovers (see the videos list).");
+            applog::push(&app, "warn", "[Video] A guild's match request failed — new recordings may not auto-upload until it recovers (see the videos list).");
         }
     }
 
@@ -322,27 +387,87 @@ fn listen_events_once(app: &tauri::AppHandle, base: &str, token: &str) -> Result
     let _ = app.emit("events-connected", ());
     let reader = std::io::BufReader::new(resp);
     let mut event_type = String::new();
+    // accumulated `data:` payload for the current frame — only the livelog events
+    // need it (pulls-changed re-scans regardless of which guild changed).
+    let mut data = String::new();
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.is_empty() {
             // end of an SSE frame.
-            if event_type == "pulls-changed" {
-                let _ = app.emit("pulls-changed", ());
+            match event_type.as_str() {
+                "pulls-changed" => {
+                    let _ = app.emit("pulls-changed", ());
+                }
+                "livelog-active" => apply_livelog_event(app, LivelogEvent::Snapshot, &data),
+                "livelog-started" => apply_livelog_event(app, LivelogEvent::Started, &data),
+                "livelog-stopped" => apply_livelog_event(app, LivelogEvent::Stopped, &data),
+                _ => {}
             }
             event_type.clear();
+            data.clear();
         } else if let Some(rest) = line.strip_prefix("event:") {
             event_type = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            // multiple data: lines in one frame are joined with newlines per spec;
+            // our payloads are single-line json, so a plain append is fine.
+            data.push_str(rest.trim());
         }
-        // `data:` lines and `:` keepalive comments are ignored — the companion
-        // re-scans regardless of which guild changed.
+        // `:` keepalive comments are ignored.
     }
+    // the connection dropped. the active-livelog set is now unknown, but we keep
+    // it as-is (don't clear) so a brief reconnect blip doesn't stop a tailer that's
+    // mid-raid; the next "livelog-active" snapshot replaces it authoritatively.
     Ok(())
 }
 
-#[tauri::command(async)]
-fn list_pulls(guild_id: String) -> Result<Vec<api::PullSummary>, String> {
-    let token = keychain::get_token().ok_or("Not signed in")?;
-    ApiClient::production(token).list_pulls(&guild_id)
+enum LivelogEvent {
+    Snapshot,
+    Started,
+    Stopped,
+}
+
+/// apply a livelog SSE frame to the active-guild set, then reconcile the tailer.
+/// snapshot replaces the whole set; started/stopped add/remove one guild.
+fn apply_livelog_event(app: &tauri::AppHandle, kind: LivelogEvent, data: &str) {
+    let value: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let state = app.state::<AppState>();
+    {
+        let mut active = state.combatlog.active_guilds.lock_safe();
+        match kind {
+            LivelogEvent::Snapshot => {
+                *active = value
+                    .get("guildIds")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+            }
+            LivelogEvent::Started => {
+                if let Some(id) = value.get("guildId").and_then(|v| v.as_str()) {
+                    if !active.iter().any(|g| g == id) {
+                        active.push(id.to_string());
+                    }
+                }
+            }
+            LivelogEvent::Stopped => {
+                if let Some(id) = value.get("guildId").and_then(|v| v.as_str()) {
+                    active.retain(|g| g != id);
+                }
+            }
+        }
+    }
+    combatlog::reconcile(app);
+}
+
+#[tauri::command]
+async fn list_pulls(guild_id: String) -> Result<Vec<api::PullSummary>, String> {
+    run_blocking(move || {
+        let token = keychain::get_token().ok_or("Not signed in")?;
+        ApiClient::production(token).list_pulls(&guild_id)
+    })
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -387,7 +512,7 @@ fn manual_match(app: tauri::AppHandle, state: tauri::State<AppState>, video_id: 
     };
     if let Some(item) = item {
         if let Some(m) = &item.matched {
-            applog::push(&app, "info", format!("Manually matched {} → {} #{}", item.filename, m.boss_name, m.pull_number));
+            applog::push(&app, "info", format!("[Video] Manually matched {} → {} #{}", item.filename, m.boss_name, m.pull_number));
         }
         let _ = app.emit("video-updated", item);
     }
@@ -491,6 +616,70 @@ fn set_upload_limit(app: tauri::AppHandle, mbps: Option<f64>) -> Result<Settings
     // (and can overflow Duration::from_secs_f64). None = unlimited.
     s.upload_limit_mbps = mbps.filter(|m| *m > 0.0).map(|m| m.max(0.05));
     s.save(&path)?;
+    Ok(s)
+}
+
+// ── combat-log livelog watching ───────────────────────────────
+
+/// set the WoW Logs folder (containing WoWCombatLog.txt) and re-evaluate whether
+/// the tailer should run.
+#[tauri::command]
+fn set_logs_folder(app: tauri::AppHandle, path: String) -> Result<Settings, String> {
+    let p = settings_path(&app)?;
+    let mut s = Settings::load(&p);
+    s.logs_folder = Some(path);
+    s.save(&p)?;
+    combatlog::reconcile(&app);
+    Ok(s)
+}
+
+/// native folder picker for the WoW Logs directory; starts in the user's home as
+/// a sensible default (the real Logs folder lives deep under the WoW install,
+/// which varies per machine).
+#[tauri::command(async)]
+fn pick_logs_folder(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file();
+    if let Ok(home) = app.path().home_dir() {
+        dialog = dialog.set_directory(home);
+    }
+    dialog
+        .blocking_pick_folder()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// toggle combat-log livelog watching (default-on); persists and re-evaluates the
+/// tailer.
+#[tauri::command]
+fn set_livelog_watching(app: tauri::AppHandle, enabled: bool) -> Result<Settings, String> {
+    let p = settings_path(&app)?;
+    let mut s = Settings::load(&p);
+    s.livelog_watching = Some(enabled);
+    s.save(&p)?;
+    applog::push(
+        &app,
+        "info",
+        if enabled { "[Combatlog] livelog watching enabled" } else { "[Combatlog] livelog watching disabled" },
+    );
+    combatlog::reconcile(&app);
+    Ok(s)
+}
+
+/// toggle auto-upload of matched recordings (default-on); persists the choice. the
+/// frontend owns the actual gating + the re-baseline on enable (so turning it on
+/// never sweeps up recordings/pulls found beforehand).
+#[tauri::command]
+fn set_auto_upload(app: tauri::AppHandle, enabled: bool) -> Result<Settings, String> {
+    let p = settings_path(&app)?;
+    let mut s = Settings::load(&p);
+    s.auto_upload = Some(enabled);
+    s.save(&p)?;
+    applog::push(
+        &app,
+        "info",
+        if enabled { "[Video] auto-upload enabled" } else { "[Video] auto-upload disabled" },
+    );
     Ok(s)
 }
 
@@ -601,6 +790,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .setup(|app| {
+            // build the shared blocking http client now, on the main thread, so it
+            // is never first built (or dropped) inside an async worker context.
+            api::warm_http_client();
+            // first-run: auto-fill the WoW Logs folder if we can find it.
+            autodetect_folders(app.handle());
             build_tray(app.handle())?;
             // seed the in-memory activity log from disk so it survives restarts.
             let persisted = applog::load(app.handle());
@@ -667,6 +861,10 @@ pub fn run() {
             resume_uploads,
             cancel_uploads,
             set_upload_limit,
+            set_logs_folder,
+            pick_logs_folder,
+            set_livelog_watching,
+            set_auto_upload,
             install_update
         ])
         .run(tauri::generate_context!())

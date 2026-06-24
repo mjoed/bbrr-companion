@@ -1,6 +1,6 @@
 [package]
 name = "bbrr-companion"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop companion for Booty Bay Raid Review — watches your WarcraftRecorder/Archon folder and auto-uploads matched pull videos."
 authors = ["Booty Bay Raid Review"]
 license = "MIT"
@@ -41,6 +41,9 @@ urlencoding = "2"
 # folder watching + recursive scan for WarcraftRecorder videos.
 notify = "6"
 walkdir = "2"
+# local-to-UTC timestamp conversion for combat-log lines (ENCOUNTER_* are in the
+# machine's local time). clock feature pulls the system timezone for Local.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # native folder picker.
 tauri-plugin-dialog = "2"
 

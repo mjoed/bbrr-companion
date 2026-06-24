@@ -16,6 +16,26 @@ pub struct Settings {
     /// upload speed cap in MB/s. None = unlimited.
     #[serde(default)]
     pub upload_limit_mbps: Option<f64>,
+    /// the WoW Logs directory containing WoWCombatLog.txt.
+    #[serde(default)]
+    pub logs_folder: Option<String>,
+    /// combat-log livelog watching. None or true = enabled (default-on); only an
+    /// explicit false disables it.
+    #[serde(default)]
+    pub livelog_watching: Option<bool>,
+    /// auto-upload of matched recordings. None or true = enabled (default-on);
+    /// only an explicit false disables it. when off, matched recordings wait for a
+    /// manual upload.
+    #[serde(default)]
+    pub auto_upload: Option<bool>,
+}
+
+impl Settings {
+    /// the effective livelog-watching flag — default-on, so only an explicit
+    /// false turns it off.
+    pub fn livelog_watching_enabled(&self) -> bool {
+        self.livelog_watching.unwrap_or(true)
+    }
 }
 
 impl Settings {
