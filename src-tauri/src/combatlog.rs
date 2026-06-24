@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 /// every combat-log activity-log line carries this prefix (the video pipeline
@@ -24,6 +24,9 @@ const TAG: &str = "[Combatlog] ";
 
 /// how often the tailer wakes to read appended bytes.
 const POLL_MS: u64 = 500;
+
+/// how often we beat the server while actively tailing the log (server TTL ~50s).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 /// shared controller for the tailer thread. `tailer` holds the live tailer's OWN
 /// stop flag — Some = a tailer is running (or was just asked to stop), None =
@@ -83,6 +86,13 @@ pub fn reconcile(app: &AppHandle) {
         if let Some(stop) = tailer.take() {
             stop.store(true, Ordering::Relaxed);
         }
+        // clear server presence ONLY on an actual disable — not on session-end or a
+        // restart (where `enabled` stays true). that way the lone `false` beat can
+        // never reorder past a fresh `true` from a tailer starting right behind us;
+        // session-end presence simply ages out via the server TTL.
+        if !enabled {
+            spawn_heartbeat(false);
+        }
         crate::applog::push(app, "info", format!("{TAG}live session ended — stopped watching"));
     }
 }
@@ -112,6 +122,8 @@ fn run(app: &AppHandle, folder: &str, stop: &Arc<AtomicBool>) {
     // log "combat log not found" at most once per run so a missing file doesn't
     // spam the activity log every poll.
     let mut warned_missing = false;
+    // when we last beat the server (only while a log file is actually open).
+    let mut last_hb: Option<Instant> = None;
 
     while !stop.load(Ordering::Relaxed) {
         // (re)open if we have no handle or the chosen path changed/rotated.
@@ -131,6 +143,10 @@ fn run(app: &AppHandle, folder: &str, stop: &Arc<AtomicBool>) {
                         // file appearing mid-session lands here on the next poll.
                         let fname = t.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                         crate::applog::push(app, "info", format!("{TAG}now watching {fname}"));
+                        // beat right away on open so a pull ending in the first ~20s
+                        // is still recognized as companion-driven (not just at +20s).
+                        spawn_heartbeat(true);
+                        last_hb = Some(Instant::now());
                     }
                     Err(_) => {
                         file = None;
@@ -167,8 +183,31 @@ fn run(app: &AppHandle, folder: &str, stop: &Arc<AtomicBool>) {
             }
         }
 
+        // heartbeat: only while we actually have the combat log open — that trio
+        // (livelog enabled + live session + log found) is the "it's working"
+        // signal that earns the 5-min poll backstop. when the file isn't found we
+        // stay quiet and the server-side presence ages out.
+        if open_path.is_some() {
+            if last_hb.map(|t| t.elapsed() >= HEARTBEAT_INTERVAL).unwrap_or(true) {
+                spawn_heartbeat(true);
+                last_hb = Some(Instant::now());
+            }
+        } else {
+            last_hb = None;
+        }
+
         sleep_until_stop(stop, POLL_MS);
     }
+}
+
+/// fire-and-forget liveness beat, off the tail loop's thread so a slow POST never
+/// delays log reads. watching=true while tailing the log, false to clear presence.
+fn spawn_heartbeat(watching: bool) {
+    std::thread::spawn(move || {
+        if let Some(token) = crate::keychain::get_token() {
+            let _ = ApiClient::production(token).post_heartbeat(watching);
+        }
+    });
 }
 
 /// sleep ~`ms` in short slices so a stop request is noticed promptly.

@@ -264,6 +264,19 @@ impl ApiClient {
         read_json::<EncounterSignalResp>(res, "encounter signal")
     }
 
+    /// liveness heartbeat: while watching=true the server shows "companion
+    /// connected" and relaxes that guild's livelog poll to the 5-min backstop;
+    /// watching=false clears it. fire-and-forget — the body is just {ok:true}.
+    pub fn post_heartbeat(&self, watching: bool) -> Result<(), String> {
+        self.http
+            .post(format!("{}/api/companion/heartbeat", self.base))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "watching": watching }))
+            .send()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// recent pulls the user played in a guild — for the manual-match picker.
     pub fn list_pulls(&self, guild_id: &str) -> Result<Vec<PullSummary>, String> {
         #[derive(Deserialize)]
