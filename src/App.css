@@ -94,6 +94,13 @@ body {
   padding: 1rem 1.25rem;
 }
 
+/* a collapsible section nested inside a card — a divider rather than its own box. */
+.subcard {
+  border-top: 1px solid #1c2530;
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+}
+
 .card-title {
   font-weight: 600;
   margin-bottom: 0.5rem;

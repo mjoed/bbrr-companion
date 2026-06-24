@@ -24,14 +24,17 @@ function CollapseCard({
   onToggle,
   head,
   children,
+  nested,
 }: {
   open: boolean;
   onToggle: () => void;
   head: ReactNode;
   children: ReactNode;
+  // render as a divided sub-section (no card chrome) for nesting inside a card.
+  nested?: boolean;
 }) {
   return (
-    <div className="card">
+    <div className={nested ? "subcard" : "card"}>
       <button className="collapse-head" onClick={onToggle}>
         <span className="chev">{open ? "▾" : "▸"}</span>
         {head}
@@ -305,40 +308,18 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
 
   return (
     <section className="content">
-      {/* guilds — pick which to upload to */}
-      <div className="card">
-        <div className="card-title">Upload to</div>
-        {guilds.length === 0 ? (
-          <p className="muted">You're not in any guild with upload access.</p>
-        ) : (
-          <div className="guild-toggles">
-            {[...guilds].sort((a, b) => Number(a.isPersonal) - Number(b.isPersonal)).map((g) => (
-              <button
-                key={g.id}
-                className={`guild-toggle ${isSelected(g.id) ? "on" : ""}`}
-                onClick={() => toggleGuild(g.id)}
-              >
-                <span className="guild-name">{g.name}</span>
-                {g.isPersonal && <span className="tag">personal</span>}
-              </button>
-            ))}
-          </div>
-        )}
-        <p className="muted small" style={{ marginTop: "0.6rem" }}>
-          Closing the window keeps it running in the system tray. Use the tray icon → Quit to exit.
-        </p>
-      </div>
-
-      {/* folder + watching */}
+      {/* automatic video upload: folder + autoupload toggle + per-guild upload
+          destination (the only thing the guild picker affects, so it lives here). */}
       <div className="card">
         <div className="row spread">
-          <div className="card-title" style={{ marginBottom: 0 }}>WarcraftRecorder or Archon video folder</div>
+          <div className="card-title" style={{ marginBottom: 0 }}>Automatic Video Upload</div>
           <label className="autostart-toggle">
             <span className={settings.autoUpload !== false ? "on" : "off"}>Autoupload</span>
             <input type="checkbox" checked={settings.autoUpload !== false} onChange={toggleAutoUpload} />
           </label>
         </div>
-        <div className="row spread" style={{ marginTop: "0.75rem" }}>
+        <div className="muted small" style={{ marginTop: "0.75rem" }}>Select WarcraftRecorder or Archon video output folder</div>
+        <div className="row spread" style={{ marginTop: "0.4rem" }}>
           <span className="path muted small">{settings.watchFolder ?? "No folder selected"}</span>
           <button className="btn ghost" onClick={chooseFolder}>Choose…</button>
         </div>
@@ -363,10 +344,145 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
           />
           <span className="muted small">MB/s — blank for unlimited</span>
         </div>
+
+        {/* upload destination — only the video upload uses it, so it's nested here. */}
+        <div className="muted small" style={{ marginTop: "1rem", marginBottom: "0.5rem", fontWeight: 600 }}>Upload to</div>
+        {guilds.length === 0 ? (
+          <p className="muted">You're not in any guild with upload access.</p>
+        ) : (
+          <div className="guild-toggles">
+            {[...guilds].sort((a, b) => Number(a.isPersonal) - Number(b.isPersonal)).map((g) => (
+              <button
+                key={g.id}
+                className={`guild-toggle ${isSelected(g.id) ? "on" : ""}`}
+                onClick={() => toggleGuild(g.id)}
+              >
+                <span className="guild-name">{g.name}</span>
+                {g.isPersonal && <span className="tag">personal</span>}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* recording lists — matched / uploaded / unmatched — grouped here since
+            they all describe the recordings this card uploads. */}
+        <CollapseCard
+          nested
+          open={showMatched}
+          onToggle={() => setShowMatched((v) => !v)}
+          head={`Videos matched (${matched.length})`}
+        >
+          <div style={{ marginTop: "0.5rem" }}>
+            {watching && (
+              <p className="muted small" style={{ marginBottom: "0.5rem" }}>
+                New recordings upload automatically while watching. These were already here — upload them on click.
+              </p>
+            )}
+            {matched.length === 0 ? (
+              <p className="muted small">
+                {settings.watchFolder ? "No matched recordings waiting to upload." : "Choose your WarcraftRecorder or Archon folder to begin."}
+              </p>
+            ) : (
+              <>
+                <div className="videos">
+                  {shownMatched.map((v) => (
+                    <MatchedVideoRow
+                      key={v.id}
+                      v={v}
+                      canUp={v.matched?.canUpload !== false}
+                      retryNeedsCanUp={false}
+                      onUpload={enqueue}
+                    />
+                  ))}
+                </div>
+                {matched.length > MATCHED_LIMIT && (
+                  <button className="view-more" onClick={() => setShowAllMatched((v) => !v)}>
+                    {showAllMatched ? "Show fewer" : `View all ${matched.length}`}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </CollapseCard>
+
+        {matchedOther.length > 0 && (
+          <CollapseCard
+            nested
+            open={showMatchedOther}
+            onToggle={() => setShowMatchedOther((v) => !v)}
+            head={`Videos matched (other players) (${matchedOther.length})`}
+          >
+            <div style={{ marginTop: "0.5rem" }}>
+              <div className="videos">
+                {shownMatchedOther.map((v) => (
+                  <MatchedVideoRow
+                    key={v.id}
+                    v={v}
+                    canUp={v.matched?.canUpload === true}
+                    retryNeedsCanUp={true}
+                    onUpload={enqueue}
+                  />
+                ))}
+              </div>
+              {matchedOther.length > MATCHED_LIMIT && (
+                <button className="view-more" onClick={() => setShowAllMatchedOther((v) => !v)}>
+                  {showAllMatchedOther ? "Show fewer" : `View all ${matchedOther.length}`}
+                </button>
+              )}
+            </div>
+          </CollapseCard>
+        )}
+
+        {existing.length > 0 && (
+          <CollapseCard
+            nested
+            open={showExisting}
+            onToggle={() => setShowExisting((v) => !v)}
+            head={`Uploaded (${existing.length})`}
+          >
+            <div className="videos" style={{ marginTop: "0.5rem" }}>
+              {existing.map((v) => (
+                <VideoRow key={v.id} filename={v.filename} right={<span className="badge uploaded">Uploaded</span>}>
+                  <div className="muted small accent">{matchLine(v)}</div>
+                  <div className="muted small">{fmtSize(v.sizeBytes)} · already on the server</div>
+                </VideoRow>
+              ))}
+            </div>
+          </CollapseCard>
+        )}
+
+        {others.length > 0 && (
+          <CollapseCard
+            nested
+            open={showUnmatched}
+            onToggle={() => setShowUnmatched((v) => !v)}
+            head={`Videos without matches (${others.length})`}
+          >
+            <div className="videos" style={{ marginTop: "0.5rem" }}>
+              {others.map((v) => (
+                <VideoRow
+                  key={v.id}
+                  filename={v.filename}
+                  right={
+                    v.status === "unmatched" || v.status === "error" || v.status === "skipped" ? (
+                      <button className="btn ghost match-btn" onClick={() => setMatchTarget(v)}>Match…</button>
+                    ) : undefined
+                  }
+                >
+                  <div className="muted small">
+                    {v.reason ?? "No matching pull found"}
+                    {v.playerName ? ` · ${v.playerName}` : ""}
+                  </div>
+                </VideoRow>
+              ))}
+            </div>
+          </CollapseCard>
+        )}
       </div>
 
-      {/* combat-log watching — accelerates livelog WCL polling when a guild is
-          actively livelog-ing. mirrors the video-folder card above. */}
+      {/* livelog speedup — companion tails the combat log and pokes the web app's
+          livelog poller the moment a tracked boss ends. global across all the
+          user's guilds; the only control is the on/off toggle. */}
       {(() => {
         // default-on: null counts as enabled, so only an explicit false disables.
         const livelogOn = settings.livelogWatching !== false;
@@ -378,7 +494,7 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
         return (
           <div className="card">
             <div className="row spread">
-              <div className="card-title" style={{ marginBottom: 0 }}>WoWCombatLog watching</div>
+              <div className="card-title" style={{ marginBottom: 0 }}>Livelog Speedup</div>
               <label className="autostart-toggle">
                 <span className={livelogOn ? "on" : "off"}>Livelog Watching</span>
                 <input type="checkbox" checked={livelogOn} onChange={toggleLivelogWatching} />
@@ -392,6 +508,11 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
           </div>
         );
       })()}
+
+      {/* general: the app keeps running in the tray when the window is closed. */}
+      <p className="muted small">
+        Closing the window keeps it running in the system tray. Use the tray icon → Quit to exit.
+      </p>
 
       {/* upload control (only while something is in flight) */}
       {(uploadActive || queuedVideos.length > 0) && (() => {
@@ -483,119 +604,6 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
           </CollapseCard>
         );
       })()}
-
-      {/* 1. matched, not yet uploaded — collapsed by default */}
-      <CollapseCard
-        open={showMatched}
-        onToggle={() => setShowMatched((v) => !v)}
-        head={`Videos matched (${matched.length})`}
-      >
-        <div style={{ marginTop: "0.5rem" }}>
-          {watching && (
-            <p className="muted small" style={{ marginBottom: "0.5rem" }}>
-              New recordings upload automatically while watching. These were already here — upload them on click.
-            </p>
-          )}
-          {matched.length === 0 ? (
-            <p className="muted small">
-              {settings.watchFolder ? "No matched recordings waiting to upload." : "Choose your WarcraftRecorder or Archon folder to begin."}
-            </p>
-          ) : (
-            <>
-              <div className="videos">
-                {shownMatched.map((v) => (
-                  <MatchedVideoRow
-                    key={v.id}
-                    v={v}
-                    canUp={v.matched?.canUpload !== false}
-                    retryNeedsCanUp={false}
-                    onUpload={enqueue}
-                  />
-                ))}
-              </div>
-              {matched.length > MATCHED_LIMIT && (
-                <button className="view-more" onClick={() => setShowAllMatched((v) => !v)}>
-                  {showAllMatched ? "Show fewer" : `View all ${matched.length}`}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </CollapseCard>
-
-      {/* 1b. matched, but another player's POV (downloaded into the folder) */}
-      {matchedOther.length > 0 && (
-        <CollapseCard
-          open={showMatchedOther}
-          onToggle={() => setShowMatchedOther((v) => !v)}
-          head={`Videos matched (other players) (${matchedOther.length})`}
-        >
-          <div style={{ marginTop: "0.5rem" }}>
-            <div className="videos">
-              {shownMatchedOther.map((v) => (
-                <MatchedVideoRow
-                  key={v.id}
-                  v={v}
-                  canUp={v.matched?.canUpload === true}
-                  retryNeedsCanUp={true}
-                  onUpload={enqueue}
-                />
-              ))}
-            </div>
-            {matchedOther.length > MATCHED_LIMIT && (
-              <button className="view-more" onClick={() => setShowAllMatchedOther((v) => !v)}>
-                {showAllMatchedOther ? "Show fewer" : `View all ${matchedOther.length}`}
-              </button>
-            )}
-          </div>
-        </CollapseCard>
-      )}
-
-      {/* 2. matched but already on the server */}
-      {existing.length > 0 && (
-        <CollapseCard
-          open={showExisting}
-          onToggle={() => setShowExisting((v) => !v)}
-          head={`POV already existing (${existing.length})`}
-        >
-          <div className="videos" style={{ marginTop: "0.5rem" }}>
-            {existing.map((v) => (
-              <VideoRow key={v.id} filename={v.filename} right={<span className="badge uploaded">Uploaded</span>}>
-                <div className="muted small accent">{matchLine(v)}</div>
-                <div className="muted small">{fmtSize(v.sizeBytes)} · already on the server</div>
-              </VideoRow>
-            ))}
-          </div>
-        </CollapseCard>
-      )}
-
-      {/* 3. no usable match */}
-      {others.length > 0 && (
-        <CollapseCard
-          open={showUnmatched}
-          onToggle={() => setShowUnmatched((v) => !v)}
-          head={`Videos without matches (${others.length})`}
-        >
-          <div className="videos" style={{ marginTop: "0.5rem" }}>
-            {others.map((v) => (
-              <VideoRow
-                key={v.id}
-                filename={v.filename}
-                right={
-                  v.status === "unmatched" || v.status === "error" || v.status === "skipped" ? (
-                    <button className="btn ghost match-btn" onClick={() => setMatchTarget(v)}>Match…</button>
-                  ) : undefined
-                }
-              >
-                <div className="muted small">
-                  {v.reason ?? "No matching pull found"}
-                  {v.playerName ? ` · ${v.playerName}` : ""}
-                </div>
-              </VideoRow>
-            ))}
-          </div>
-        </CollapseCard>
-      )}
 
       {matchTarget && (
         <MatchPicker

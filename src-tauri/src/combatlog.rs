@@ -25,18 +25,20 @@ const TAG: &str = "[Combatlog] ";
 /// how often the tailer wakes to read appended bytes.
 const POLL_MS: u64 = 500;
 
-/// shared controller for the tailer thread. mirrors the upload worker's
-/// state-flag style: a stop flag the thread polls, plus a "running" guard so we
-/// never spawn two tailers.
+/// shared controller for the tailer thread. `tailer` holds the live tailer's OWN
+/// stop flag — Some = a tailer is running (or was just asked to stop), None =
+/// none running — always read+written under its mutex so concurrent reconciles
+/// can't double-spawn or strand a tailer. giving each tailer its own flag means a
+/// fresh tailer started while a previous one is still winding down never shares a
+/// flag with it (this is what fixes the stop->start flap race).
 #[derive(Default)]
 pub struct CombatLogState {
     /// guild ids that currently have an active livelog session (from SSE). the
     /// tailer signals every guild in this set on a qualifying ENCOUNTER_END.
     pub active_guilds: Mutex<Vec<String>>,
-    /// set true to ask the running tailer to stop; it exits within ~POLL_MS.
-    stop: Arc<AtomicBool>,
-    /// true while a tailer thread is alive (guards against double-spawn).
-    running: Arc<AtomicBool>,
+    /// the running tailer's private stop flag: set true to ask it to exit (it does
+    /// within ~POLL_MS). None when no tailer is running.
+    tailer: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl CombatLogState {
@@ -62,31 +64,36 @@ pub fn reconcile(app: &AppHandle) {
     let enabled = settings.livelog_watching_enabled();
     let folder = settings.logs_folder.clone();
     let has_active = !state.combatlog.active_guilds.lock_safe().is_empty();
-    let running = state.combatlog.running.load(Ordering::Relaxed);
-
     let should_run = enabled && has_active && folder.is_some();
+
+    // hold the tailer lock across the whole start/stop decision so concurrent
+    // reconciles (the SSE reader thread plus command threads) can't both act on a
+    // stale view and double-spawn or strand a tailer.
+    let mut tailer = state.combatlog.tailer.lock_safe();
+    let running = tailer.is_some();
     if should_run && !running {
-        start(app.clone(), folder.expect("checked is_some"));
+        let stop = Arc::new(AtomicBool::new(false));
+        *tailer = Some(stop.clone());
+        start(app.clone(), folder.expect("checked is_some"), stop);
         crate::applog::push(app, "info", format!("{TAG}live session started — watching the combat log"));
     } else if !should_run && running {
-        state.combatlog.stop.store(true, Ordering::Relaxed);
+        // take the flag out before signalling it, so a start racing right behind
+        // this stop sees running == false and spawns a brand-new tailer with a
+        // fresh flag instead of being suppressed by the one that's exiting.
+        if let Some(stop) = tailer.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
         crate::applog::push(app, "info", format!("{TAG}live session ended — stopped watching"));
     }
 }
 
-/// spawn the tailer thread. the stop flag is reset here and only set by
-/// reconcile, so the loop owns its own lifecycle once started.
-fn start(app: AppHandle, folder: String) {
-    let state = app.state::<crate::AppState>();
-    let stop = state.combatlog.stop.clone();
-    let running = state.combatlog.running.clone();
-    stop.store(false, Ordering::Relaxed);
-    running.store(true, Ordering::Relaxed);
+/// spawn the tailer thread with its own `stop` flag (created and stored by
+/// reconcile under the tailer lock). the thread exits when that flag is set;
+/// reconcile has already cleared the handle by then, so there's nothing to
+/// surrender on exit.
+fn start(app: AppHandle, folder: String, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         run(&app, &folder, &stop);
-        // surrender the running guard so the next reconcile can start a fresh
-        // tailer (e.g. after a folder change or a new session).
-        running.store(false, Ordering::Relaxed);
     });
 }
 
@@ -120,6 +127,10 @@ fn run(app: &AppHandle, folder: &str, stop: &Arc<AtomicBool>) {
                         open_path = Some(t.clone());
                         pending.clear();
                         warned_missing = false;
+                        // confirm pickup (and rotations) in the activity log — a new
+                        // file appearing mid-session lands here on the next poll.
+                        let fname = t.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                        crate::applog::push(app, "info", format!("{TAG}now watching {fname}"));
                     }
                     Err(_) => {
                         file = None;
@@ -170,15 +181,14 @@ fn sleep_until_stop(stop: &Arc<AtomicBool>, ms: u64) {
     }
 }
 
-/// the live file is always exactly WoWCombatLog.txt for this user; the
-/// "-MMDDYY_HHMMSS" suffix some users see comes from an external archiver. prefer
-/// the exact name, else fall back to the most-recently-modified WoWCombatLog*.txt
-/// in the folder.
+/// pick the combat-log file to tail: the most-recently-modified WoWCombatLog*.txt
+/// in the folder. modern WoW writes a fresh per-session file named
+/// WoWCombatLog-MMDDYY_HHMMSS.txt; older setups append to a single
+/// WoWCombatLog.txt. newest-by-mtime tails whichever file is actually being
+/// written right now and follows the rotation when WoW opens a new session file.
+/// we deliberately do NOT prefer the bare name — a stale leftover WoWCombatLog.txt
+/// would otherwise shadow the live timestamped file and we'd tail a dead file.
 fn find_log_file(folder: &str) -> Option<PathBuf> {
-    let exact = PathBuf::from(folder).join("WoWCombatLog.txt");
-    if exact.is_file() {
-        return Some(exact);
-    }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(folder).ok()?.flatten() {
         let path = entry.path();
@@ -189,11 +199,16 @@ fn find_log_file(folder: &str) -> Option<PathBuf> {
         if !(name.starts_with("WoWCombatLog") && name.ends_with(".txt")) {
             continue;
         }
-        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
-        if let Some(mtime) = mtime {
-            if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
-                best = Some((mtime, path));
-            }
+        // fall back to UNIX_EPOCH when the mtime is briefly unreadable (a file WoW
+        // just created can stat-fail for an instant) so we still consider it as a
+        // candidate instead of skipping it until the next poll. >= so a later entry
+        // with an equal (e.g. epoch) time still wins, never leaving us with none.
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().map(|(t, _)| mtime >= *t).unwrap_or(true) {
+            best = Some((mtime, path));
         }
     }
     best.map(|(_, p)| p)
