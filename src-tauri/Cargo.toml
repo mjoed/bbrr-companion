@@ -1,6 +1,6 @@
 [package]
 name = "bbrr-companion"
-version = "0.1.4"
+version = "0.1.5"
 description = "Desktop companion for Booty Bay Raid Review — watches your WarcraftRecorder/Archon folder and auto-uploads matched pull videos."
 authors = ["Booty Bay Raid Review"]
 license = "MIT"

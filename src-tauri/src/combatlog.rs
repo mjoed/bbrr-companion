@@ -114,8 +114,8 @@ fn run(app: &AppHandle, folder: &str, stop: &Arc<AtomicBool>) {
     let mut file: Option<std::fs::File> = None;
     let mut open_path: Option<PathBuf> = None;
     let mut offset: u64 = 0;
-    // a partial trailing line held until its newline arrives.
-    let mut pending = String::new();
+    // a partial trailing line held (as raw bytes) until its newline arrives.
+    let mut pending: Vec<u8> = Vec::new();
     // whether we're inside a CHALLENGE_MODE (m+) — encounter ends are ignored
     // while true.
     let mut in_challenge = false;
@@ -173,11 +173,24 @@ fn run(app: &AppHandle, folder: &str, stop: &Arc<AtomicBool>) {
                 pending.clear();
             }
             if size > offset {
+                // read forward in bounded slices: a heavy mythic pull appends
+                // megabytes between polls, and feeding it all as one giant chunk
+                // is what let the tailer fall behind. each slice keeps feed()
+                // cheap; the inner loop catches up fully before the next sleep.
+                const MAX_READ: usize = 4 * 1024 * 1024;
                 if f.seek(SeekFrom::Start(offset)).is_ok() {
-                    let mut buf = Vec::with_capacity((size - offset) as usize);
-                    if f.take(size - offset).read_to_end(&mut buf).is_ok() {
-                        offset += buf.len() as u64;
-                        feed(app, &mut pending, &buf, &mut in_challenge);
+                    while offset < size && !stop.load(Ordering::Relaxed) {
+                        let want = ((size - offset) as usize).min(MAX_READ);
+                        let mut buf = vec![0u8; want];
+                        match f.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.truncate(n);
+                                offset += n as u64;
+                                feed(app, &mut pending, &buf, &mut in_challenge);
+                            }
+                            Err(_) => break,
+                        }
                     }
                 }
             }
@@ -253,18 +266,21 @@ fn find_log_file(folder: &str) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// append a freshly-read byte chunk to the pending buffer, then process each
-/// complete line (newline-terminated). a trailing partial line stays buffered.
-fn feed(app: &AppHandle, pending: &mut String, buf: &[u8], in_challenge: &mut bool) {
-    // combat-log lines are utf-8; lossily decode so a stray byte can't wedge the
-    // tailer.
-    pending.push_str(&String::from_utf8_lossy(buf));
-    loop {
-        let Some(nl) = pending.find('\n') else { break };
-        let line: String = pending.drain(..=nl).collect();
-        let line = line.trim_end_matches(['\n', '\r']);
-        process_line(app, line, in_challenge);
+/// append a freshly-read byte chunk, then process every complete (newline-
+/// terminated) line in ONE pass: split the buffer once and drain the processed
+/// prefix once, so a big chunk costs O(n), not O(n²). (the old code drained each
+/// line off the front, re-shifting the whole tail every line — quadratic, which
+/// let the tailer fall hopelessly behind during high-volume mythic raids.) the
+/// trailing partial line stays buffered. working on raw bytes means a chunk
+/// boundary landing mid-utf8 can't corrupt a line — only whole lines are decoded.
+fn feed(app: &AppHandle, pending: &mut Vec<u8>, buf: &[u8], in_challenge: &mut bool) {
+    pending.extend_from_slice(buf);
+    let Some(last_nl) = pending.iter().rposition(|&b| b == b'\n') else { return };
+    for line_bytes in pending[..last_nl].split(|&b| b == b'\n') {
+        let line = String::from_utf8_lossy(line_bytes);
+        process_line(app, line.trim_end_matches('\r'), in_challenge);
     }
+    pending.drain(..=last_nl);
 }
 
 /// cheap pre-filter then dispatch a single combat-log line. only ENCOUNTER_* /

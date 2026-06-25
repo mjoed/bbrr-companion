@@ -19,6 +19,18 @@ that uses your OS's built-in webview rather than bundling a browser.
 - A clear list of every video — uploaded, matched-but-skipped, or unmatched (with manual
   match) — plus an activity log, live status, an upload speed limit, and pause/cancel.
 
+## Windows SmartScreen warning
+
+The installer isn't code-signed with a Microsoft/EV certificate, so on first run
+Windows SmartScreen may warn about an **unknown publisher** or an unrecognized app.
+This is expected and normal for a small open-source app like this — click
+**More info → Run anyway** to proceed.
+
+Updates are still cryptographically verified: the app checks a
+[minisign](https://jedisct1.github.io/minisign/) signature on every downloaded
+update, so you're protected against tampered binaries even without the Microsoft
+signature.
+
 ## Privacy
 
 - The only network calls are to the Raid Review API and to
