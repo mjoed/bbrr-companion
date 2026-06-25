@@ -308,6 +308,57 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
 
   return (
     <section className="content">
+      {/* upload control (only while something is in flight) — kept at the top so
+          progress stays visible without scrolling past the video/livelog cards. */}
+      {(uploadActive || queuedVideos.length > 0) && (() => {
+        const pct = active ? uploadPct(active) : null;
+        return (
+          <div className="card">
+            <div className="row spread">
+              <div className="muted small">
+                {paused ? "Uploads paused" : active ? `Uploading ${active.filename}` : "Uploading…"}
+              </div>
+              <div className="row">
+                {paused ? (
+                  <button className="btn primary" onClick={resume}>Resume</button>
+                ) : (
+                  <button className="btn ghost" onClick={pause}>Pause</button>
+                )}
+                <button className="btn ghost" onClick={cancel}>Cancel</button>
+              </div>
+            </div>
+            {active && (
+              <div className="row" style={{ marginTop: "0.6rem" }}>
+                <div className="progress" style={{ flex: 1 }}>
+                  <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
+                </div>
+                <span className="muted small nowrap">{pct != null ? `${Math.round(pct)}%` : "…"}</span>
+              </div>
+            )}
+            {active && !paused && speed != null && (
+              <div className="muted small" style={{ marginTop: "0.35rem" }}>
+                {fmtSpeed(speed)}
+                {speed > 0 && active.uploadedBytes != null
+                  ? (() => {
+                      const eta = fmtEta((active.sizeBytes - active.uploadedBytes) / speed);
+                      return eta ? ` · ${eta}` : "";
+                    })()
+                  : ""}
+              </div>
+            )}
+            {upNext.length > 0 && (
+              <div className="queue-list">
+                <div className="muted small">Next up ({upNext.length})</div>
+                {upNext.slice(0, 5).map((v) => (
+                  <div key={v.id} className="queue-item muted small">{v.filename}</div>
+                ))}
+                {upNext.length > 5 && <div className="muted small">+{upNext.length - 5} more</div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* automatic video upload: folder + autoupload toggle + per-guild upload
           destination (the only thing the guild picker affects, so it lives here). */}
       <div className="card">
@@ -505,61 +556,6 @@ export default function SignedIn({ guilds }: { guilds: Guild[] }) {
               <button className="btn ghost" onClick={chooseLogsFolder}>Browse…</button>
             </div>
             <div className="muted small" style={{ marginTop: "0.6rem" }}>{status}</div>
-          </div>
-        );
-      })()}
-
-      {/* general: the app keeps running in the tray when the window is closed. */}
-      <p className="muted small">
-        Closing the window keeps it running in the system tray. Use the tray icon → Quit to exit.
-      </p>
-
-      {/* upload control (only while something is in flight) */}
-      {(uploadActive || queuedVideos.length > 0) && (() => {
-        const pct = active ? uploadPct(active) : null;
-        return (
-          <div className="card">
-            <div className="row spread">
-              <div className="muted small">
-                {paused ? "Uploads paused" : active ? `Uploading ${active.filename}` : "Uploading…"}
-              </div>
-              <div className="row">
-                {paused ? (
-                  <button className="btn primary" onClick={resume}>Resume</button>
-                ) : (
-                  <button className="btn ghost" onClick={pause}>Pause</button>
-                )}
-                <button className="btn ghost" onClick={cancel}>Cancel</button>
-              </div>
-            </div>
-            {active && (
-              <div className="row" style={{ marginTop: "0.6rem" }}>
-                <div className="progress" style={{ flex: 1 }}>
-                  <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
-                </div>
-                <span className="muted small nowrap">{pct != null ? `${Math.round(pct)}%` : "…"}</span>
-              </div>
-            )}
-            {active && !paused && speed != null && (
-              <div className="muted small" style={{ marginTop: "0.35rem" }}>
-                {fmtSpeed(speed)}
-                {speed > 0 && active.uploadedBytes != null
-                  ? (() => {
-                      const eta = fmtEta((active.sizeBytes - active.uploadedBytes) / speed);
-                      return eta ? ` · ${eta}` : "";
-                    })()
-                  : ""}
-              </div>
-            )}
-            {upNext.length > 0 && (
-              <div className="queue-list">
-                <div className="muted small">Next up ({upNext.length})</div>
-                {upNext.slice(0, 5).map((v) => (
-                  <div key={v.id} className="queue-item muted small">{v.filename}</div>
-                ))}
-                {upNext.length > 5 && <div className="muted small">+{upNext.length - 5} more</div>}
-              </div>
-            )}
           </div>
         );
       })()}
