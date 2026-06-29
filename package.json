@@ -1,7 +1,7 @@
 {
   "name": "bbrr-companion",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Desktop companion for Booty Bay Raid Review — watches your WarcraftRecorder folder and auto-uploads matched pull videos.",
   "license": "MIT",
   "type": "module",

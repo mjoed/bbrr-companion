@@ -97,12 +97,15 @@ pub struct EncounterSignal {
     pub end_time: i64,
 }
 
-/// the server's verdict on an encounter signal: whether the boss is tracked, and
-/// whether an immediate poll was actually triggered (vs. debounced).
+/// the server's verdict on an encounter signal: whether the boss is tracked,
+/// whether an immediate poll was actually triggered, and a machine-readable reason
+/// so the log can be honest about WHY a poll didn't fire (older servers omit it).
 #[derive(Debug, Clone, Deserialize)]
 pub struct EncounterSignalResp {
     pub tracked: bool,
     pub polled: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

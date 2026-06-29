@@ -385,10 +385,28 @@ fn handle_encounter_end(app: &AppHandle, ts: &str, body: &str) {
         };
         match client.post_encounter_signal(&payload) {
             Ok(resp) => {
-                let msg = match (resp.tracked, resp.polled) {
-                    (true, true) => format!("{TAG}server polling WCL for the new pull"),
-                    (true, false) => format!("{TAG}duplicate signal — server already polling"),
-                    (false, _) => format!("{TAG}{name} not a tracked raid encounter — ignored"),
+                // prefer the server's explicit reason so we report the REAL state,
+                // not a blanket "duplicate" for every no-poll response. fall back to
+                // tracked/polled only for an older server that doesn't send a reason.
+                let msg = match resp.reason.as_deref() {
+                    Some("polling") => format!("{TAG}server polling WCL for the new pull"),
+                    Some("already-polling") => {
+                        format!("{TAG}already polling for this pull — another ping beat us to it")
+                    }
+                    Some("not-live-logging") => {
+                        format!("{TAG}{name}: server isn't live-logging this guild — not accelerated")
+                    }
+                    Some("no-armed-session") => {
+                        format!("{TAG}{name}: no live session armed on the server — not accelerated")
+                    }
+                    Some("not-tracked") => {
+                        format!("{TAG}{name} not a tracked raid encounter — ignored")
+                    }
+                    _ => match (resp.tracked, resp.polled) {
+                        (true, true) => format!("{TAG}server polling WCL for the new pull"),
+                        (true, false) => format!("{TAG}server already polling or not live-logging this guild"),
+                        (false, _) => format!("{TAG}{name} not a tracked raid encounter — ignored"),
+                    },
                 };
                 crate::applog::push(app, "info", msg);
             }
