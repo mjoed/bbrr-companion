@@ -53,9 +53,13 @@ pub struct ArchonPlayer {
     pub server_name: Option<String>,
 }
 
-/// a `{ "name": ... }` object — Archon's `contentType`.
+/// a `{ "id": ..., "name": ... }` object — Archon's `contentType`. `id` is the
+/// stable machine key ("raids" / "clips"); `name` is localized by the client
+/// ("Schlachtzüge" on a German install), so it is only a fallback.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NamedRef {
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -69,10 +73,19 @@ impl RecorderMeta {
 
     /// clips and non-raid recordings never match a pull POV. WarcraftRecorder
     /// flags clips via `clippedAt` / a non-"Raids" `category`; Archon carries the
-    /// recording type under `contentType.name`.
+    /// recording type under `contentType` — decided by its stable `id` when it is
+    /// one we know, else by the (localized) `name`, mirroring the server's
+    /// normalizeRecorderMetadata so both sides skip the same files.
     pub fn is_clip(&self) -> bool {
         if self.clipped_at.is_some() {
             return true;
+        }
+        if let Some(id) = self.content_type.as_ref().and_then(|c| c.id.as_deref()) {
+            match id.to_ascii_lowercase().as_str() {
+                "raids" => return false,
+                "clips" => return true,
+                _ => {}
+            }
         }
         let content = self
             .category

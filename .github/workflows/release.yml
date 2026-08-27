@@ -7,6 +7,12 @@ name: release
 # requires two repo secrets (Settings → Secrets and variables → Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           — the updater signing private key (from `tauri signer generate`)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — its password
+#
+# if authenticode signing is ever added (windows SmartScreen): it MUST run
+# DURING the tauri build, via bundle.windows.signCommand in tauri.conf.json —
+# never as a post-build step. authenticode rewrites the installer bytes and the
+# updater's minisign signature above is computed over those bytes, so signing
+# afterwards silently breaks auto-update for every installed copy.
 on:
   push:
     tags:
