@@ -417,6 +417,7 @@ pub fn run_worker(app: AppHandle) {
                     }
                 });
                 crate::applog::push(&app, "info", format!("[Video] Uploaded {} to {}", video.filename, guild));
+                crate::persist_current_videos(&app);
             }
             Ok(UploadOutcome::Cancelled) => {
                 {
@@ -449,6 +450,7 @@ pub fn run_worker(app: AppHandle) {
                     v.uploaded_bytes = None;
                     v.reason = Some(e);
                 });
+                crate::persist_current_videos(&app);
             }
         }
     }

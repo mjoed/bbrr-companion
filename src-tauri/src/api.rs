@@ -305,21 +305,32 @@ impl ApiClient {
         filename: &str,
         storage: Option<&str>,
     ) -> Result<CreateUpload, String> {
-        let res = self
-            .http
-            .post(format!("{}/api/povs/create-upload", self.base))
-            .bearer_auth(&self.token)
-            .json(&serde_json::json!({
-                "pullId": pull_id,
-                "playerName": player_name,
-                "realm": realm,
-                "sizeBytes": size_bytes,
-                "filename": filename,
-                "storage": storage,
-            }))
-            .send()
-            .map_err(|e| e.to_string())?;
-        read_json::<CreateUpload>(res, "create-upload")
+        let body = serde_json::json!({
+            "pullId": pull_id,
+            "playerName": player_name,
+            "realm": realm,
+            "sizeBytes": size_bytes,
+            "filename": filename,
+            "storage": storage,
+        });
+        // one retry on a server error: the create step raced other uploaders'
+        // storage rotation on the server (2026-09-24) and a second try a moment
+        // later goes through. parts already retry; the create step didn't.
+        for attempt in 1..=2 {
+            let res = self
+                .http
+                .post(format!("{}/api/povs/create-upload", self.base))
+                .bearer_auth(&self.token)
+                .json(&body)
+                .send()
+                .map_err(|e| e.to_string())?;
+            if attempt == 1 && res.status().is_server_error() {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                continue;
+            }
+            return read_json::<CreateUpload>(res, "create-upload");
+        }
+        unreachable!("create_upload loop always returns")
     }
 
     /// finalise the multipart upload; returns the created PullVideo id.

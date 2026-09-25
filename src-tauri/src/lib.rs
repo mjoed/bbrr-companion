@@ -71,6 +71,14 @@ fn videos_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     Some(dir.join("videos.json"))
 }
 
+/// write the current in-memory video list to the cache. the upload worker
+/// calls this after a status change so a restart doesn't resurrect a stale
+/// "matched" for a file that had finished uploading.
+pub(crate) fn persist_current_videos(app: &tauri::AppHandle) {
+    let videos = app.state::<AppState>().videos.lock_safe().clone();
+    persist_videos(app, &videos);
+}
+
 fn persist_videos(app: &tauri::AppHandle, videos: &[VideoItem]) {
     if let Some(path) = videos_path(app) {
         if let Ok(json) = serde_json::to_string(videos) {
@@ -280,6 +288,14 @@ async fn scan(app: tauri::AppHandle, state: tauri::State<'_, AppState>, verify: 
             continue;
         }
         let reason_suffix = |reason: &Option<String>| reason.as_deref().map(|x| format!(" ({x})")).unwrap_or_default();
+        // a file that had been uploaded is now something else — say so in one
+        // line whatever the new status is (pending/skipped are otherwise silent),
+        // so a "why is this back in the list" has a trail
+        let was_uploaded = prev.iter().find(|cached| cached.id == item.id).map(|cached| cached.status == "uploaded").unwrap_or(false);
+        if was_uploaded && item.status != "uploaded" {
+            applog::push(&app, "info", format!("[Video] No longer listed as uploaded: {} — now {}{}", item.filename, item.status, reason_suffix(&item.reason)));
+            continue;
+        }
         match item.status.as_str() {
             "matched" => {
                 if let Some(m) = &item.matched {
