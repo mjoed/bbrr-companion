@@ -45,6 +45,11 @@ export function useVideoPipeline(autoUploadEnabled: boolean): VideoPipeline {
   // more pass runs afterwards — otherwise rapid SSE pushes (importing several
   // pulls at once) would be dropped by the single-flight guard.
   const pendingScanRef = useRef(false);
+  // a verify request that arrives mid-scan must run AS a verify afterwards —
+  // re-running with the busy scan's flag would silently downgrade it to a cheap
+  // scan, and the periodic backstop is the only thing that re-checks "uploaded"
+  // files against the server.
+  const pendingVerifyRef = useRef(false);
   const debounceRef = useRef<number | null>(null);
   // last progress sample, for the speed estimate (id + bytes + timestamp).
   const speedRef = useRef<{ id: string; bytes: number; t: number } | null>(null);
@@ -71,13 +76,21 @@ export function useVideoPipeline(autoUploadEnabled: boolean): VideoPipeline {
 
   const doScan = useCallback(
     async (verify = false) => {
-      if (scanningRef.current) { pendingScanRef.current = true; return; }
+      if (scanningRef.current) {
+        pendingScanRef.current = true;
+        if (verify) pendingVerifyRef.current = true;
+        return;
+      }
       scanningRef.current = true;
       setScanning(true);
       try {
+        let runVerify = verify;
         do {
           pendingScanRef.current = false;
-          const { videos: next, matchOk } = await ipc.scan(verify);
+          runVerify = runVerify || pendingVerifyRef.current;
+          pendingVerifyRef.current = false;
+          const { videos: next, matchOk } = await ipc.scan(runVerify);
+          runVerify = false; // a coalesced follow-up is cheap unless a verify was asked for meanwhile
           // a scan returns an in-flight upload with its persisted uploadedBytes (0);
           // keep the live byte count the progress events track so the bar doesn't
           // snap back to 0% when a scan lands mid-upload.

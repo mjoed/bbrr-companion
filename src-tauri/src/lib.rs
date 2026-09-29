@@ -280,9 +280,36 @@ async fn scan(app: tauri::AppHandle, state: tauri::State<'_, AppState>, verify: 
             _ => f,
         })
         .collect();
+    // the worker may have moved entries on while the scan ran (an upload
+    // finished, failed, was cancelled or requeued). an entry whose live state
+    // differs from the pre-scan snapshot is the worker's: keep it, or the stale
+    // snapshot copy ("uploading", 0 bytes) overwrites the result — and since the
+    // merge above protects "uploading", it would then stick until a restart.
+    let mut worker_owned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let merged: Vec<VideoItem> = {
+        let live = state.videos.lock_safe();
+        merged
+            .into_iter()
+            .map(|item| {
+                let snap = prev.iter().find(|c| c.id == item.id);
+                let cur = live.iter().find(|c| c.id == item.id);
+                match (snap, cur) {
+                    (Some(s), Some(c)) if s != c => {
+                        worker_owned.insert(c.id.clone());
+                        c.clone()
+                    }
+                    _ => item,
+                }
+            })
+            .collect()
+    };
     // activity log for newly-discovered or status-changed videos. uploads are
     // logged by the worker; pending/skipped are too noisy to log.
     for item in &merged {
+        // the worker already logged its own transitions
+        if worker_owned.contains(&item.id) {
+            continue;
+        }
         let changed = prev.iter().find(|cached| cached.id == item.id).map(|cached| cached.status != item.status).unwrap_or(true);
         if !changed {
             continue;
